@@ -1,7 +1,10 @@
-# src/momentum_strategy.py
+# src/momentum_strategy.py - Updated with LSTM signals, logging, and plot fix
 import backtrader as bt
 import backtrader.indicators as btind
 import pandas as pd
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
 
 class MomentumBreakout(bt.Strategy):
     params = (
@@ -15,9 +18,32 @@ class MomentumBreakout(bt.Strategy):
         self.rsi = btind.RSI(period=self.p.rsi_period)  # Momentum trigger
         self.atr = btind.ATR(period=self.p.atr_period)  # Volatility stop
 
+        # Load LSTM model and scaler
+        self.lstm = load_model('models/lstm_model.h5')
+        hist_df = pd.read_csv('data/features.csv')
+        self.scaler = MinMaxScaler().fit(hist_df['close_spy'].values.reshape(-1,1))
+
     def next(self):
+        # Get last 60 closes for LSTM sequence
+        closes = self.data.close.get(size=60)
+        if len(closes) < 60:  # Skip if not enough data
+            return
+
+        # Reshape and scale for LSTM input
+        seq = np.array(closes).reshape(1, 60, 1)
+        seq_scaled = self.scaler.transform(seq.reshape(-1,1)).reshape(1, 60, 1)
+
+        # Predict next close (scaled)
+        pred_scaled = self.lstm.predict(seq_scaled)[0][0]
+
+        # Inverse scale to real price
+        pred = self.scaler.inverse_transform([[pred_scaled]])[0][0]
+
+        # Log for debug
+        print(f"LSTM Pred: {pred:.2f}, Current Close: {self.data.close[0]:.2f}")
+
         if not self.position:  # No open position
-            if self.data.close > self.sma and self.rsi > 60:  # Long breakout
+            if self.data.close > self.sma and self.rsi > 60 and pred > self.data.close[0]:  # LSTM filter: Pred up
                 self.buy(size=100)  # 100 shares (adjust for futures later)
                 self.sell(exectype=bt.Order.Stop, price=self.data.close - 2 * self.atr[0])  # 2xATR stop
         else:  # In position
@@ -40,5 +66,5 @@ print("Final Portfolio Value: %.2f" % cerebro.broker.getvalue())
 print(f"Sharpe Ratio: {results[0].analyzers.sharpe.get_analysis()['sharperatio']:.2f}")
 print(f"Max Drawdown: {results[0].analyzers.drawdown.get_analysis()['max']['drawdown']:.2f}%")
 
-# Plot results (requires matplotlib)
-cerebro.plot()
+# Plot results (with voloverlay=False to fix NaN/Inf)
+cerebro.plot(voloverlay=False)

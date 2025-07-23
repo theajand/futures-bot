@@ -1,4 +1,4 @@
-# src/feature_eng.py - With date fix, guards, all-NaN drop, and fillna
+# src/feature_eng.py - With date fix, guards, all-NaN drop, fillna, and raw data clean
 import pandas as pd
 import numpy as np
 from ta import add_all_ta_features
@@ -22,7 +22,8 @@ else:
     df.columns = df.columns.str.lower()
 
 df.to_csv('data/spy_historical.csv')  # Save raw early
-print(f"Saved raw: {len(df)} rows")
+df.fillna(0, inplace=True)  # <-- New: Clean NaN in raw data early to prevent propagation
+print(f"Saved raw and cleaned: {len(df)} rows")  # Updated print for confirm
 
 df = add_all_ta_features(
     df,
