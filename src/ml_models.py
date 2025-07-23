@@ -1,4 +1,4 @@
-# src/ml_models.py - Refined with TimeSeries CV, Optuna tuning, feature selection, and data guard
+# src/ml_models.py - Refined with TimeSeries CV, Optuna tuning, feature selection, and data guard; fixed string col issue
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
@@ -7,15 +7,16 @@ from sklearn.metrics import accuracy_score, mean_squared_error
 from xgboost import XGBClassifier, XGBRegressor
 import optuna
 
-# Load features
-df = pd.read_csv('data/features.csv', parse_dates=True, index_col='timestamp')
+# Load features (updated read: index_col=0 for unnamed index, parse_dates=[0])
+df = pd.read_csv('data/features.csv', index_col=0, parse_dates=[0])
 
 # Guard: Check for empty data
 if len(df) == 0:
     print("Error: features.csv is empty. Rerun feature_eng.py.")
     exit()
 
-# Clean inf/nan
+# Clean inf/nan, drop any lingering non-numeric cols (e.g., if extras)
+df = df.select_dtypes(include=[np.number])  # Ensure only numerics
 df.replace([np.inf, -np.inf], 0, inplace=True)
 df.fillna(0, inplace=True)
 
@@ -52,10 +53,10 @@ X_top = X[top_feats]
 acc_xgb_top = []
 for train_idx, test_idx in tscv.split(X_top):
     X_train_top, X_test_top = X_top.iloc[train_idx], X_top.iloc[test_idx]
-    y_train_top, y_test_top = y.iloc[train_idx], y.iloc[test_idx]
+    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
     xgb_top = XGBClassifier()
-    xgb_top.fit(X_train_top, y_train_top)
-    acc_xgb_top.append(accuracy_score(y_test_top, xgb_top.predict(X_test_top)))
+    xgb_top.fit(X_train_top, y_train)
+    acc_xgb_top.append(accuracy_score(y_test, xgb_top.predict(X_test_top)))
 
 print(f"XGB Accuracy on Top Features: {np.mean(acc_xgb_top):.2f}")
 
