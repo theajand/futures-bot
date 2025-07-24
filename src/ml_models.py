@@ -1,4 +1,4 @@
-# src/ml_models.py - LSTM scaled, no LSTM in ensemble, TimeSeries CV, Optuna, Mac-optimized MPS
+# src/ml_models.py - LSTM scaled, no LSTM in ensemble, TimeSeries CV, Optuna, Mac-optimized MPS; short seq/hidden for 1m
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
@@ -29,9 +29,9 @@ scaled_df['target'] = df['target']  # Unscale label
 price_scaler = MinMaxScaler()  # For close_spy
 scaled_df['close_spy'] = price_scaler.fit_transform(df[['close_spy']])
 
-# Dataset for LSTM
+# Dataset for LSTM (short seq_len=5 for 1m)
 class TimeSeriesDataset(Dataset):
-    def __init__(self, X, y, seq_len=30):
+    def __init__(self, X, y, seq_len=5):  # Short for intraday
         self.X = X
         self.y = y
         self.seq_len = seq_len
@@ -42,9 +42,9 @@ class TimeSeriesDataset(Dataset):
     def __getitem__(self, idx):
         return torch.tensor(self.X[idx:idx+self.seq_len], dtype=torch.float32), torch.tensor(self.y[idx+self.seq_len], dtype=torch.float32)
 
-# LSTM Model
+# LSTM Model (reduced hidden_size=10 for speed)
 class LSTMModel(nn.Module):
-    def __init__(self, input_size, hidden_size=20, num_layers=1, output_size=1):
+    def __init__(self, input_size, hidden_size=10, num_layers=1, output_size=1):  # Reduced for intraday
         super().__init__()
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, output_size)
@@ -77,8 +77,8 @@ def train_lstm(X_train, y_train, input_size, epochs=5, batch_size=128, is_class=
         print(f"LSTM Training: Epoch {epoch+1}/{epochs} Loss {loss.item():.4f}")
     return model
 
-# Predict with LSTM
-def predict_lstm(model, X_test, seq_len=30):
+# Predict with LSTM (match seq_len=5)
+def predict_lstm(model, X_test, seq_len=5):
     device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
     preds = []
     for i in range(len(X_test) - seq_len):
@@ -119,7 +119,7 @@ for split_num, (train_idx, test_idx) in enumerate(tscv.split(X), 1):
     # LSTM
     lstm = train_lstm(X_train_cv, y_train_cv, input_size=X.shape[1])
     lstm_prob = predict_lstm(lstm, X_test_cv)
-    acc_lstm.append(accuracy_score(y_test_cv[30:], (lstm_prob > 0.5).astype(int)))
+    acc_lstm.append(accuracy_score(y_test_cv[5:], (lstm_prob > 0.5).astype(int)))  # Match seq_len
 
     # Ensemble (XGB + RF only for stability)
     ensemble_prob = (xgb_prob + rf_prob) / 2
@@ -160,7 +160,7 @@ best_xgb.save_model('models/xgb_tuned_model.json')
 
 # Regression
 X_reg = scaled_df.drop('close_spy', axis=1).values
-y_reg = scaled_df['close_spy'].values  # Use scaled prices
+y_reg = scaled_df['close_spy'].values  # Scaled
 mse_xgb_list, mse_lstm_list = [], []
 tscv_reg = TimeSeriesSplit(n_splits=2)
 for split_num, (train_idx, test_idx) in enumerate(tscv_reg.split(X_reg), 1):
@@ -173,12 +173,12 @@ for split_num, (train_idx, test_idx) in enumerate(tscv_reg.split(X_reg), 1):
 
     lstm_reg = train_lstm(X_train_reg, y_train_reg, input_size=X_reg.shape[1], is_class=False)
     lstm_pred = predict_lstm(lstm_reg, X_test_reg)
-    mse_lstm_list.append(mean_squared_error(y_test_reg[30:], lstm_pred))
+    mse_lstm_list.append(mean_squared_error(y_test_reg[5:], lstm_pred))
     print(f"Regression CV Split {split_num}/2 Done")
 
 print(f"XGB CV MSE: {np.mean(mse_xgb_list):.4f}")
 print(f"LSTM CV MSE: {np.mean(mse_lstm_list):.4f}")
 
-# Save scaler for backtest
+# Save scaler
 import joblib
 joblib.dump(price_scaler, 'models/price_scaler.pkl')

@@ -1,4 +1,4 @@
-# src/rl_env.py - Gym env + Torch DQN for dynamic position sizing (big on low vol, small high)
+# src/rl_env.py - Gym env + Torch DQN for dynamic position sizing (big on low vol, small high); 1m train
 import gym
 from gym import spaces
 import numpy as np
@@ -11,7 +11,7 @@ import pandas as pd
 
 # Custom Env (state: vol, equity, current position; reward: return - drawdown penalty)
 class TradingEnv(gym.Env):
-    def __init__(self, data):  # data = df with 'atr_14' vol proxy, 'Returns' = close.pct_change
+    def __init__(self, data):  # data = df with 'atr_5' vol proxy, 'returns' = close.pct_change
         super().__init__()
         self.data = data.reset_index(drop=True)
         self.current_step = 0
@@ -22,16 +22,16 @@ class TradingEnv(gym.Env):
         self.current_step = 0
         self.equity = 100000
         self.position = 0
-        return np.array([self.data['atr_14'][0], self.equity, self.position])
+        return np.array([self.data['atr_5'][0], self.equity, self.position])
 
     def step(self, action):
         size = [0.5, 0.75, 1.0, 1.5, 2.0][action]
-        ret = self.data['Returns'][self.current_step] * size
+        ret = self.data['returns'][self.current_step] * size
         self.equity *= (1 + ret)
-        reward = ret - 0.01 * (self.data['atr_14'][self.current_step] * size)**2  # Penalize high vol big size
+        reward = ret - 0.01 * (self.data['atr_5'][self.current_step] * size)**2  # Penalize high vol big size
         self.current_step += 1
         done = self.current_step >= len(self.data) - 1
-        obs = np.array([self.data['atr_14'][self.current_step], self.equity, size])
+        obs = np.array([self.data['atr_5'][self.current_step], self.equity, size])
         return obs, reward, done, {}
 
 # DQN Agent
@@ -47,8 +47,8 @@ class DQN(nn.Module):
         x = torch.relu(self.fc2(x))
         return self.out(x)
 
-# Train agent
-def train_rl(df, episodes=100, batch_size=64, gamma=0.99, eps_start=1.0, eps_end=0.01, eps_decay=0.995):
+# Train agent (1m load, episodes=50 for quick)
+def train_rl(df, episodes=50, batch_size=64, gamma=0.99, eps_start=1.0, eps_end=0.01, eps_decay=0.995):
     env = TradingEnv(df)
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.n
@@ -95,7 +95,7 @@ def train_rl(df, episodes=100, batch_size=64, gamma=0.99, eps_start=1.0, eps_end
     torch.save(agent.state_dict(), 'models/dqn_sizing.pth')
     return agent
 
-# Example: Load df from features, add 'Returns' = close_spy.pct_change, train
+# Example: Load 1m features, add 'returns' = close_spy.pct_change, train
 df = pd.read_csv('data/features.csv')
-df['Returns'] = df['close_spy'].pct_change().fillna(0)
+df['returns'] = df['close_spy'].pct_change().fillna(0)
 train_rl(df)

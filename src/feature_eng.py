@@ -1,11 +1,11 @@
-# src/feature_eng.py - Enhanced with VIX, pure pandas indicators, added ATR/vol_ratio, sentiment temped, no duplicate timestamp
+# src/feature_eng.py - Intraday 1m switch (short 7d for yf limit fix, no error/hang), CNN Fear & Greed sentiment (fixed fetch with try-except), pure pandas, VIX (daily ffill), guards
 import pandas as pd
 import yfinance as yf
 import numpy as np
-# Removed requests/bs4/vader imports for now—sentiment temped to 0
+import requests
 
-# Custom RSI (Wilder's method using ewm)
-def calculate_rsi(series, window=14):
+# Custom RSI/ATR (short windows for intraday)
+def calculate_rsi(series, window=5):  # Short for 1m
     delta = series.diff(1)
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -15,55 +15,70 @@ def calculate_rsi(series, window=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-# Custom ATR (Average True Range for vol)
-def calculate_atr(high, low, close, window=14):
+def calculate_atr(high, low, close, window=5):  # Short for 1m
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
     tr3 = abs(low - close.shift(1))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=window, adjust=False).mean()  # Wilder ewm
+    atr = tr.ewm(span=window, adjust=False).mean()
     return atr
 
-# Download SPY data (daily for now; later intraday)
-start_date = '2018-01-01'  # 5+ years for robust training
-end_date = '2025-07-23'    # Up to current
-spy = yf.download('SPY', start=start_date, end=end_date)
-spy = spy.droplevel(1, axis=1)  # Flatten MultiIndex columns (drop ticker level)
-# No spy['timestamp'] = spy.index — index is already set
+# Download SPY intraday (1m, last 7d for yf limit)
+start_date = '2025-07-16'  # ~7d back for 1m (yf max free per request)
+end_date = '2025-07-23'
+spy = yf.download('SPY', start=start_date, end=end_date, interval='1m')
+spy = spy.droplevel(1, axis=1) if spy.columns.nlevels > 1 else spy
+spy.index = spy.index.tz_localize(None)  # Strip timezone for alignment
 
-# Add basics: RSI, SMAs, MACD (pure pandas)
-spy['rsi_14'] = calculate_rsi(spy['Close'], window=14)
-spy['sma_20'] = spy['Close'].rolling(window=20).mean()
-spy['sma_50'] = spy['Close'].rolling(window=50).mean()
-spy['sma_200'] = spy['Close'].rolling(window=200).mean()
-spy['ema_12'] = spy['Close'].ewm(span=12, adjust=False).mean()
-spy['ema_26'] = spy['Close'].ewm(span=26, adjust=False).mean()
-spy['macd'] = spy['ema_12'] - spy['ema_26']
-spy['macd_signal'] = spy['macd'].ewm(span=9, adjust=False).mean()
+# Add indicators (short for intraday)
+spy['rsi_5'] = calculate_rsi(spy['Close'], window=5)  # Rename for short
+spy['sma_10'] = spy['Close'].rolling(10).mean()  # Short SMA
+spy['sma_20'] = spy['Close'].rolling(20).mean()
+spy['ema_5'] = spy['Close'].ewm(span=5, adjust=False).mean()  # Short EMA
+spy['ema_10'] = spy['Close'].ewm(span=10, adjust=False).mean()
+spy['macd'] = spy['ema_5'] - spy['ema_10']
+spy['macd_signal'] = spy['macd'].ewm(span=4, adjust=False).mean()  # Short
+spy['atr_5'] = calculate_atr(spy['High'], spy['Low'], spy['Close'], window=5)
+spy['vol_ratio'] = spy['Volume'] / spy['Volume'].rolling(10).mean()
 
-# New feats: ATR, vol_ratio
-spy['atr_14'] = calculate_atr(spy['High'], spy['Low'], spy['Close'], window=14)
-spy['vol_ratio'] = spy['Volume'] / spy['Volume'].rolling(window=20).mean()
-
-# Targets: Classification (1=up, 0=down) and regression (next close)
+# Targets (next 1m close)
 spy['target'] = np.where(spy['Close'].shift(-1) > spy['Close'], 1, 0)
-spy['close_spy'] = spy['Close'].shift(-1)  # Predict next close
+spy['close_spy'] = spy['Close'].shift(-1)
 
-# Add VIX (volatility index)
+# VIX (daily, ffill for 1m—since 1m VIX not avail free)
 vix = yf.download('^VIX', start=start_date, end=end_date)
-vix = vix.droplevel(1, axis=1)  # Flatten
-spy = spy.join(vix['Close'], rsuffix='_vix')  # Align on dates
+vix = vix.droplevel(1, axis=1) if vix.columns.nlevels > 1 else vix
+vix.index = vix.index.tz_localize(None)  # Strip timezone for alignment
+vix = vix.reindex(spy.index, method='ffill')  # Ffill daily to 1m
+spy = spy.join(vix['Close'], rsuffix='_vix')
 spy['vix_ma_5'] = spy['Close_vix'].rolling(5).mean()
 spy['vix_ma_20'] = spy['Close_vix'].rolling(20).mean()
 spy.rename(columns={'Close_vix': 'vix_close'}, inplace=True)
+spy['vix_close'].fillna(method='ffill', inplace=True)  # Fill any gaps
 
-# Sentiment: Temp set to 0 (current scrape not historical—upgrade next)
-spy['sentiment_score'] = 0.0  # Placeholder; adds no edge yet
+# Sentiment (CNN daily, ffill for 1m—fetches once, fills forward)
+url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{start_date}"
+headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'}
+try:
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    data = resp.json()
+    if 'fear_and_greed_historical' in data and 'data' in data['fear_and_greed_historical']:
+        fg_data = data['fear_and_greed_historical']['data']
+        fg_df = pd.DataFrame(fg_data)
+        fg_df['timestamp'] = pd.to_datetime(fg_df['x'] / 1000, unit='s')
+        fg_df.set_index('timestamp', inplace=True)
+        fg_df['sentiment_score'] = (fg_df['y'] / 50 - 1)  # -1 to 1
+        fg_df = fg_df.reindex(spy.index, method='ffill')  # Fill daily to 1m
+        spy['sentiment_score'] = fg_df['sentiment_score'].fillna(0)
+    else:
+        raise ValueError("Invalid JSON")
+except Exception as e:
+    print(f"Sentiment fetch failed: {e}—using fallback 0.0")
+    spy['sentiment_score'] = 0.0
 
-# Clean and save
+# Clean/save
 spy.dropna(inplace=True)
-spy.replace([np.inf, -np.inf], 0, inplace=True)
 spy.to_csv('data/features.csv', index=True)
-
 print(f"Features engineered and saved: {spy.shape[0]} rows, {spy.shape[1]} columns")
 print(spy.head())
